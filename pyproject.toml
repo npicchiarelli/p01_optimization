@@ -1,0 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "experimental_optimizers"
+version = "0.1.0"
