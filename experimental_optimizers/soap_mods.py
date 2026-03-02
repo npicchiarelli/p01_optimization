@@ -59,6 +59,7 @@ class SOAP(optim.Optimizer):
         normalize_grads: bool = False,
         data_format: str = "channels_first",
         correct_bias: bool = True,
+        projection: bool = True, # Whether or not to project gradients to the eigenbases of Shampoo's preconditioner (state['Q'] in the code).
     ):
         defaults = {
             "lr": lr,
@@ -72,6 +73,7 @@ class SOAP(optim.Optimizer):
             "precondition_1d": precondition_1d,
             "normalize_grads": normalize_grads,
             "correct_bias": correct_bias,
+            "projection": projection,
         }
         super().__init__(params, defaults)
         self._data_format = data_format
@@ -149,13 +151,15 @@ class SOAP(optim.Optimizer):
                     self.update_preconditioner(grad, state,
                                                max_precond_dim=group['max_precond_dim'],
                                                merge_dims=group["merge_dims"],
-                                               precondition_1d=group["precondition_1d"])
+                                               precondition_1d=group["precondition_1d"],
+                                               projection=group["projection"],
+                                            )
                     continue # first step is skipped so that we never use the current gradients in the projection.
                 
                 # Projecting gradients to the eigenbases of Shampoo's preconditioner 
                 # i.e. projecting to the eigenbases of matrices in state['GG']
-                # grad_projected = self.project(grad, state, merge_dims=group["merge_dims"], 
-                                            #   max_precond_dim=group['max_precond_dim'])
+                grad_projected = self.project(grad, state, merge_dims=group["merge_dims"], 
+                                              max_precond_dim=group['max_precond_dim'])
 
                 grad_projected = grad
                 exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
@@ -172,8 +176,8 @@ class SOAP(optim.Optimizer):
                 
                 # Projecting the exponential moving average of gradients to the eigenbases of Shampoo's preconditioner 
                 # i.e. projecting to the eigenbases of matrices in state['GG']
-                # exp_avg_projected = self.project(exp_avg, state, merge_dims=group["merge_dims"],
-                #                                  max_precond_dim=group['max_precond_dim'])
+                exp_avg_projected = self.project(exp_avg, state, merge_dims=group["merge_dims"],
+                                                  max_precond_dim=group['max_precond_dim'])
                 exp_avg_projected = exp_avg
                 
                 step_size = group["lr"]
@@ -184,8 +188,8 @@ class SOAP(optim.Optimizer):
 
                 # Projecting back the preconditioned (by Adam) exponential moving average of gradients
                 # to the original space
-                # norm_grad = self.project_back(exp_avg_projected / denom, state, merge_dims=group["merge_dims"],
-                #                                  max_precond_dim=group['max_precond_dim'])
+                norm_grad = self.project_back(exp_avg_projected / denom, state, merge_dims=group["merge_dims"],
+                                                 max_precond_dim=group['max_precond_dim'])
                 
                 norm_grad = exp_avg_projected / denom
 
@@ -210,7 +214,8 @@ class SOAP(optim.Optimizer):
                 self.update_preconditioner(grad, state, 
                                                max_precond_dim=group['max_precond_dim'],
                                                merge_dims=group["merge_dims"],
-                                               precondition_1d=group["precondition_1d"])
+                                               precondition_1d=group["precondition_1d"],
+                                               projection=group["projection"],)
         
         return loss
     
@@ -269,7 +274,7 @@ class SOAP(optim.Optimizer):
         return grad
         
     def update_preconditioner(self, grad, state, 
-                              max_precond_dim=10000, merge_dims=False, precondition_1d=False):
+                              max_precond_dim=10000, merge_dims=False, precondition_1d=False, projection=True):
         """
         Updates the preconditioner matrices and the eigenbases (L, R, Q_L, Q_R in the paper).
         """
@@ -304,10 +309,12 @@ class SOAP(optim.Optimizer):
             state['Q'] = self.get_orthogonal_matrix(state['GG']) # Paper: For the first iteration, eigenvectors are initialized by doing a standard eigenvector decomposition.
         if state['step'] > 0 and state['step'] % state['precondition_frequency'] == 0:
             state['Q'] = self.get_orthogonal_matrix_QR(state, max_precond_dim, merge_dims) # Paper: QR decomposition
-            # state['Q'] = self.get_fast_QR(state, max_precond_dim, merge_dims)             
+            # state['Q'] = self.get_fast_QR(state, max_precond_dim, merge_dims)
+        if not projection:
+            state['Q'] = self.get_identity_projector(state['GG'])  
 
         if state["step"] > 0:
-            state["exp_avg"] = self.project(state["exp_avg"], state, merge_dims=merge_dims, max_precond_dim=max_precond_dim) 
+            state["exp_avg"] = self.project(state["exp_avg"], state, merge_dims=merge_dims, max_precond_dim=max_precond_dim)
 
     def project_back(self, grad, state, merge_dims=False, max_precond_dim=10000):
         """
@@ -430,6 +437,37 @@ class SOAP(optim.Optimizer):
                 exp_avg_sq = exp_avg_sq.reshape(orig_shape)
                 
         state['exp_avg_sq'] = exp_avg_sq
+        return final
+    
+    def get_identity_projector(self, mat):
+        """
+        Returns an identity matrix of the same shape as the input matrix.
+        We use this to not actually project to the eigenbases of the preconditioner, which helps us understand the effect of the projection step in SOAP.
+        """
+        matrix = []
+        for m in mat:
+            if len(m) == 0:
+                matrix.append([])
+                continue
+            if m.data.dtype != torch.float:
+                float_data = False
+                original_type = m.data.dtype
+                original_device = m.data.device
+                matrix.append(m.data.float())
+            else:
+                float_data = True
+                matrix.append(m.data)
+
+        final = []
+        for m in matrix:
+            if len(m) == 0:
+                final.append([])
+                continue
+            Q = torch.eye(m.shape[0], device=m.device)
+
+            if not float_data:
+                Q = Q.to(original_device).type(original_type)
+            final.append(Q)
         return final
     
     
