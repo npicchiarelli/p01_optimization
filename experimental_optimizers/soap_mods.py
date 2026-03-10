@@ -137,6 +137,10 @@ class SOAP(optim.Optimizer):
                     state["exp_avg"] = torch.zeros_like(grad)
                     # Exponential moving average of squared gradient values
                     state["exp_avg_sq"] = torch.zeros_like(grad)
+                if "grad_proj" not in state:
+                        state["grad_proj"] = torch.zeros_like(grad)
+                if "grad" not in state:
+                        state["grad"] = torch.zeros_like(grad)
                 
                 if 'Q' not in state:
                     self.init_preconditioner(
@@ -153,15 +157,16 @@ class SOAP(optim.Optimizer):
                                                merge_dims=group["merge_dims"],
                                                precondition_1d=group["precondition_1d"],
                                                projection=group["projection"],
-                                            )
+                                              )
                     continue # first step is skipped so that we never use the current gradients in the projection.
                 
                 # Projecting gradients to the eigenbases of Shampoo's preconditioner 
                 # i.e. projecting to the eigenbases of matrices in state['GG']
                 grad_projected = self.project(grad, state, merge_dims=group["merge_dims"], 
                                               max_precond_dim=group['max_precond_dim'])
+                state['grad_proj'] = grad_projected
+                state['grad'] = grad
 
-                grad_projected = grad
                 exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
                 beta1, beta2 = group["betas"]
 
@@ -176,8 +181,8 @@ class SOAP(optim.Optimizer):
                 
                 # Projecting the exponential moving average of gradients to the eigenbases of Shampoo's preconditioner 
                 # i.e. projecting to the eigenbases of matrices in state['GG']
-                exp_avg_projected = self.project(exp_avg, state, merge_dims=group["merge_dims"],
-                                                  max_precond_dim=group['max_precond_dim'])
+                # exp_avg_projected = self.project(exp_avg, state, merge_dims=group["merge_dims"],
+                #                                  max_precond_dim=group['max_precond_dim'])
                 exp_avg_projected = exp_avg
                 
                 step_size = group["lr"]
@@ -190,8 +195,6 @@ class SOAP(optim.Optimizer):
                 # to the original space
                 norm_grad = self.project_back(exp_avg_projected / denom, state, merge_dims=group["merge_dims"],
                                                  max_precond_dim=group['max_precond_dim'])
-                
-                norm_grad = exp_avg_projected / denom
 
                 if group["normalize_grads"]:
                     norm_grad = norm_grad / (1e-30+torch.mean(norm_grad**2)**0.5)
@@ -215,7 +218,8 @@ class SOAP(optim.Optimizer):
                                                max_precond_dim=group['max_precond_dim'],
                                                merge_dims=group["merge_dims"],
                                                precondition_1d=group["precondition_1d"],
-                                               projection=group["projection"],)
+                                               projection=group["projection"],
+                                              )
         
         return loss
     
@@ -304,13 +308,14 @@ class SOAP(optim.Optimizer):
                                 dims=[[*chain(range(idx), range(idx + 1, len(grad.shape)))]] * 2,
                             )
                         state['GG'][idx].lerp_(outer_product, 1-state['shampoo_beta'])
-                     
-        if state['Q'] is None:
-            state['Q'] = self.get_orthogonal_matrix(state['GG']) # Paper: For the first iteration, eigenvectors are initialized by doing a standard eigenvector decomposition.
-        if state['step'] > 0 and state['step'] % state['precondition_frequency'] == 0:
-            state['Q'] = self.get_orthogonal_matrix_QR(state, max_precond_dim, merge_dims) # Paper: QR decomposition
+        
+        if projection:
+            if state['Q'] is None:
+                state['Q'] = self.get_orthogonal_matrix(state['GG']) # Paper: For the first iteration, eigenvectors are initialized by doing a standard eigenvector decomposition.
+            if state['step'] > 0 and state['step'] % state['precondition_frequency'] == 0:
+                state['Q'] = self.get_orthogonal_matrix_QR(state, max_precond_dim, merge_dims) # Paper: QR decomposition
             # state['Q'] = self.get_fast_QR(state, max_precond_dim, merge_dims)
-        if not projection:
+        else:
             state['Q'] = self.get_identity_projector(state['GG'])  
 
         if state["step"] > 0:
