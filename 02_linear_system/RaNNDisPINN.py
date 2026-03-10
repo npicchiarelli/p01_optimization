@@ -2,6 +2,8 @@ import numpy as np
 import torch
 from of_pybind11_system import of_pybind11_system
 
+print("imported")
+"""
 # ---------------------------
 # Connect to pybind system
 # ---------------------------
@@ -128,3 +130,4 @@ a.exportT(".", "2", "T")  # true test
 
 a.setT(np.abs(Y_test_pred - T_test_true).reshape(-1,))
 a.exportT(".", "3", "T")  # error map
+"""
