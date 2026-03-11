@@ -8,4 +8,4 @@ version = "0.1.0"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["experimental_optimizers*"]
+include = ["experimental_optimizers*", "ml_tools*"]
