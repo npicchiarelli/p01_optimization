@@ -1,7 +1,11 @@
+import pickle as pkl
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+from torch.optim import Adam
 
 from of_pybind11_system import of_pybind11_system
 from experimental_optimizers.soap_mods import SOAP
@@ -56,11 +60,11 @@ class LinearNN(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(3, hidden_size//2, bias=True),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(hidden_size//2, hidden_size, bias=True),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(hidden_size, hidden_size//2, bias=True),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(hidden_size//2, 1, bias=True),
         )
 
@@ -74,17 +78,73 @@ class LinearNN(nn.Module):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
-loader = DataLoader(TensorDataset(Input_train.to(device), T_train_true.to(device)), batch_size=len(Input_train), shuffle=True)
+loader = DataLoader(TensorDataset(Input_train.to(device), T_train_true.to(device)), batch_size=len(Input_train), shuffle=False)
 
 criterion = nn.L1Loss()
-training_repetitions = 2
+training_repetitions = 25
 epochs = 200
 
-optimizer_configs_no_projection = {
-    "SOAP_no_projection_100":   lambda p: SOAP(p, lr=0.001, betas = (0.99, 0.999), precondition_1d=True, projection=False, precondition_frequency=100, weight_decay=0.),
-    "SOAP_no_projection_10":   lambda p: SOAP(p, lr=0.001, betas = (0.99, 0.999), precondition_1d=True, projection=False, precondition_frequency=10, weight_decay=0.),
+# optimizer_configs = {
+#     "SOAP_no_projection":   lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=False, precondition_frequency=100, weight_decay=0.0, shampoo_beta=0, normalize_grads=False), # For speed
+#     "Adam":                 lambda p: Adam(p, lr=0.003, betas = (0.99, 0.999), amsgrad=False)
+# }
+
+# optimizer_configs = {
+#     "SOAP_with_projection_100":   lambda p: SOAP(p, lr=0.001, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=100, weight_decay=0.),
+#     "SOAP_with_projection_10":   lambda p: SOAP(p, lr=0.001, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=10, weight_decay=0.),
+# }
+
+optimizer_configs = {
+    "SOAP":   lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=True, precondition_frequency=10, weight_decay=0.0,), # For speed
+    "SOAPW": lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=True, precondition_frequency=10),
 }
 
 # print(Input_train.shape, T_train_true.shape)
 
-results = multi_training.train_opt(LinearNN, optimizer_configs_no_projection, criterion, loader, training_repetitions, epochs, device)
+results = multi_training.train_opt(LinearNN, optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=611)
+
+with open("outputs/optimizer_results_weight_decay.pkl", "wb") as f:
+    pkl.dump(results, f)
+
+# ---------------------------
+# TEST data setup (can differ from training)
+# ---------------------------
+S_test = np.zeros_like(S)
+for i in range(len(X)):
+    S_test[i, 0] = np.sin(np.pi * X[i]) * np.sin(np.pi * Y[i])
+
+A_mat_test = a.get_system_matrix(T, S_test).toarray()
+b_vec_test = a.get_rhs(T, S_test).reshape(-1, 1)
+
+# Input for testing [x, y, s_test]
+Input_test = torch.zeros(len(X), 3)
+Input_test[:, 0] = torch.from_numpy(X).float()
+Input_test[:, 1] = torch.from_numpy(Y).float()
+Input_test[:, 2] = torch.from_numpy(S_test[:, 0]).float()
+
+T_test_true = np.linalg.solve(A_mat_test, b_vec_test)
+
+for opt_name in results:
+    model = results[opt_name]["model"]
+
+    model.eval()
+    with torch.no_grad():
+        T_test_pred = model(Input_test.to(device)).cpu().numpy()
+
+    results_dir = "nn_results"
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+    pred_base = f"predictions_errors_{opt_name}"
+    pred_dir = os.path.join(results_dir, pred_base)
+
+    # ---------------------------
+    # Export results to OpenFOAM
+    # ---------------------------
+    a.setT(T_test_pred.reshape(-1,))
+    a.exportT(".", os.path.join(pred_dir, "1"), "T")  # predicted test
+
+    a.setT(T_test_true.reshape(-1,))
+    a.exportT(".", os.path.join(pred_dir, "2"), "T")  # true test
+
+    a.setT(np.abs(T_test_pred - T_test_true).reshape(-1,))
+    a.exportT(".", os.path.join(pred_dir, "3"), "T")  # error map
