@@ -9,7 +9,7 @@ def reset_weights(m, seed):
         torch.nn.init.xavier_normal_(m.weight)
         torch.nn.init.zeros_(m.bias)
 
-def train_opt(model_fun, opt_configs, criterion, loader, training_repetitions, epochs, device):
+def train_opt(model_fun, opt_configs, criterion, loader, training_repetitions, epochs, device, seed_offset):
     results = {}
 
     for i, opt_name in enumerate(opt_configs):
@@ -21,7 +21,7 @@ def train_opt(model_fun, opt_configs, criterion, loader, training_repetitions, e
         best_loss = float('inf')
         
         for rep in range(training_repetitions):
-            model.apply(lambda m: reset_weights(m, seed=rep+610))  # reset weights with different seed for each repetition
+            model.apply(lambda m: reset_weights(m, seed= rep + seed_offset))  # reset weights with different seed for each repetition
 
             pbar = tqdm(range(epochs), desc="Training",)
             for epoch in pbar:
@@ -40,7 +40,7 @@ def train_opt(model_fun, opt_configs, criterion, loader, training_repetitions, e
                 epoch_loss /= len(loader.dataset)  # average loss over dataset
                 loss_history[epoch, rep] = epoch_loss  # save loss for this epoch
                 if (epoch) % 10 == 0:
-                    pbar.set_postfix(mse=f"{epoch_loss:.6f}")
+                    pbar.set_postfix(loss=f"{epoch_loss:.6f}")
         model.load_state_dict(best_model_state)
-        results[opt_name] = {"model": model, "opt_state": optimizer.state_dict(), "loss_history_avg": np.mean(loss_history, axis=1), "loss_history_std": np.std(loss_history, axis=1)}
+        results[opt_name] = {"model": model, "opt_state": optimizer.state_dict(), "loss_histories": loss_history}
     return results
