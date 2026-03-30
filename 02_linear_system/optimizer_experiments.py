@@ -20,8 +20,9 @@ print(os.environ['LD_LIBRARY_PATH'])
 a = of_pybind11_system(["."])
 
 # Mesh coordinates
-X = a.getX()[0:576, 0]
-Y = a.getX()[576:1152, 0]
+X = a.getX()[0::3, 0]
+Y = a.getX()[1::3, 0]
+print(a.getX().shape)
 
 # Get temperature and source arrays from OF
 T = a.getT()
