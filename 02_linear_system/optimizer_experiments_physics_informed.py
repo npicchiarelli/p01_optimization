@@ -59,7 +59,7 @@ T_train_true = torch.from_numpy(T_train_true).float()
 # ---------------------------
 
 class LinearNN(nn.Module):
-    def __init__(self, hidden_size: int = 16):
+    def __init__(self, hidden_size: int = 64):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(3, hidden_size//2, bias=True),
@@ -78,11 +78,12 @@ class LinearNN(nn.Module):
 # Define the physics-informed loss function
 # ---------------------------
 class PhysicsInformedLoss(nn.Module):
-    def __init__(self, A_mat: np.ndarray, b_vec: np.ndarray, data_weight: float = 0.0, device=None):
+    def __init__(self, A_mat: np.ndarray, b_vec: np.ndarray, data_weight: float = 0.0, n_data_points: int = None, device=None):
         super().__init__()
         self.A = torch.from_numpy(A_mat).float().to(device)
         self.b = torch.from_numpy(b_vec).float().to(device)
         self.data_weight = data_weight
+        self.n_data_points = n_data_points
         self.mse_loss = nn.MSELoss()
 
     def forward(self, T_pred: torch.Tensor, T_true: torch.Tensor) -> torch.Tensor:
@@ -91,11 +92,19 @@ class PhysicsInformedLoss(nn.Module):
         physics_loss = torch.mean(physics_residual ** 2)
 
         # Data loss: ||T_pred - T_true||^2
-        data_loss = self.mse_loss(T_pred, T_true)
+        if self.data_weight > 0.0:
+            n = T_pred.shape[0]
+            k = self.n_data_points if self.n_data_points is not None else n
+
+            idx = torch.randperm(n, device=T_pred.device)[:k]
+            data_loss = torch.mean((T_pred[idx] - T_true[idx]) ** 2)
+        else:
+            data_loss = torch.tensor(0.0, device=T_pred.device)
 
         # Total loss with weighting
         total_loss = physics_loss + self.data_weight * data_loss
         return total_loss
+    
 # ---------------------------
 # Set up training
 # ---------------------------
@@ -105,8 +114,8 @@ print("Using device:", device)
 
 loader = DataLoader(TensorDataset(Input_train.to(device), T_train_true.to(device)), batch_size=len(Input_train), shuffle=False)
 
-criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=0.0, device=device)
-training_repetitions = 5
+criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=1e-5, n_data_points=1, device=device)
+training_repetitions = 2
 epochs = 1000
 
 # optimizer_configs = {
@@ -177,4 +186,7 @@ for opt_name in results:
     a.exportT(".", os.path.join(pred_dir, "2"), "T")  # true test
 
     a.setT(np.abs(T_test_pred - T_test_true).reshape(-1,))
-    a.exportT(".", os.path.join(pred_dir, "3"), "T")  # error map
+    a.exportT(".", os.path.join(pred_dir, "3"), "T")  # absolute error map
+    
+    a.setT(np.abs((T_test_pred - T_test_true) / (T_test_true + 1e-30)).reshape(-1,))
+    a.exportT(".", os.path.join(pred_dir, "4"), "T")  # relative error map

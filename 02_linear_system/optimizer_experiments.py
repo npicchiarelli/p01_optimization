@@ -57,15 +57,15 @@ T_train_true = torch.from_numpy(T_train_true).float()
 # ---------------------------
 
 class LinearNN(nn.Module):
-    def __init__(self, hidden_size: int = 64):
+    def __init__(self, hidden_size: int = 16):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(3, hidden_size//2, bias=True),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_size//2, hidden_size, bias=True),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_size, hidden_size//2, bias=True),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_size//2, 1, bias=True),
         )
 
@@ -82,8 +82,8 @@ print("Using device:", device)
 loader = DataLoader(TensorDataset(Input_train.to(device), T_train_true.to(device)), batch_size=len(Input_train), shuffle=False)
 
 criterion = nn.L1Loss()
-training_repetitions = 25
-epochs = 200
+training_repetitions = 1
+epochs = 1000
 
 # optimizer_configs = {
 #     "SOAP_no_projection":   lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=False, precondition_frequency=100, weight_decay=0.0, shampoo_beta=0, normalize_grads=False), # For speed
@@ -104,7 +104,7 @@ optimizer_configs = {
 
 results = multi_training.train_opt(LinearNN, optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=611)
 
-with open("outputs/optimizer_results_weight_decay.pkl", "wb") as f:
+with open("outputs/opt_state/optimizer_results_weight_decay.pkl", "wb") as f:
     pkl.dump(results, f)
 
 # ---------------------------
@@ -148,4 +148,7 @@ for opt_name in results:
     a.exportT(".", os.path.join(pred_dir, "2"), "T")  # true test
 
     a.setT(np.abs(T_test_pred - T_test_true).reshape(-1,))
-    a.exportT(".", os.path.join(pred_dir, "3"), "T")  # error map
+    a.exportT(".", os.path.join(pred_dir, "3"), "T")  # absolute error map
+    
+    a.setT(np.abs((T_test_pred - T_test_true) / (T_test_true + 1e-30)).reshape(-1,))
+    a.exportT(".", os.path.join(pred_dir, "4"), "T")  # relative error map
