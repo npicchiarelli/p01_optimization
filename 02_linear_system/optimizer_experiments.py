@@ -57,7 +57,7 @@ T_train_true = torch.from_numpy(T_train_true).float()
 # ---------------------------
 
 class LinearNN(nn.Module):
-    def __init__(self, hidden_size: int = 16):
+    def __init__(self, hidden_size: int = 64):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(3, hidden_size//2, bias=True),
@@ -81,8 +81,8 @@ print("Using device:", device)
 
 loader = DataLoader(TensorDataset(Input_train.to(device), T_train_true.to(device)), batch_size=len(Input_train), shuffle=False)
 
-criterion = nn.L1Loss()
-training_repetitions = 1
+criterion = nn.MSELoss()
+training_repetitions = 10
 epochs = 1000
 
 # optimizer_configs = {
@@ -95,16 +95,17 @@ epochs = 1000
 #     "SOAP_with_projection_10":   lambda p: SOAP(p, lr=0.001, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=10, weight_decay=0.),
 # }
 
-optimizer_configs = {
-    "SOAP":   lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=True, precondition_frequency=10, weight_decay=0.0,), # For speed
-    "SOAPW": lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=True, precondition_frequency=10),
-}
+# optimizer_configs = {
+#     "SOAP":   lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=True, precondition_frequency=10, weight_decay=0.0,), # For speed
+#     "SOAPW": lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=True, precondition_frequency=10),
+# }
+optimizer_configs = {"SOAPW": lambda p: SOAP(p, lr=0.03, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=5)}
 
 # print(Input_train.shape, T_train_true.shape)
 
 results = multi_training.train_opt(LinearNN, optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=611)
 
-with open("outputs/opt_state/optimizer_results_weight_decay.pkl", "wb") as f:
+with open("outputs/opt_state/optimizer_results_puredata_weight_decay.pkl", "wb") as f:
     pkl.dump(results, f)
 
 # ---------------------------
@@ -135,7 +136,7 @@ for opt_name in results:
     results_dir = "nn_results"
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
-    pred_base = f"predictions_errors_{opt_name}"
+    pred_base = f"predictions_errors_puredata_{opt_name}"
     pred_dir = os.path.join(results_dir, pred_base)
 
     # ---------------------------
@@ -152,3 +153,4 @@ for opt_name in results:
     
     a.setT(np.abs((T_test_pred - T_test_true) / (T_test_true + 1e-30)).reshape(-1,))
     a.exportT(".", os.path.join(pred_dir, "4"), "T")  # relative error map
+    print(f"Mean relative error for {opt_name}: {np.mean(np.abs((T_test_pred - T_test_true) / (T_test_true + 1e-30))):.6f}")
