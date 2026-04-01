@@ -14,8 +14,8 @@ from ml_tools import multi_training
 import matplotlib.pyplot as plt
 
 import os
-print(os.getcwd())
-print(os.environ['LD_LIBRARY_PATH'])
+# print(os.getcwd())
+# print(os.environ['LD_LIBRARY_PATH'])
 # ---------------------------
 # Connect to pybind system
 # ------------------------- --
@@ -78,11 +78,12 @@ class LinearNN(nn.Module):
 # Define the physics-informed loss function
 # ---------------------------
 class PhysicsInformedLoss(nn.Module):
-    def __init__(self, A_mat: np.ndarray, b_vec: np.ndarray, data_weight: float = 0.0, n_data_points: int = None, device=None):
+    def __init__(self, A_mat: np.ndarray, b_vec: np.ndarray, data_weight: float = 0.0, physics_weight: float = 1.0, n_data_points: int = None, device=None):
         super().__init__()
         self.A = torch.from_numpy(A_mat).float().to(device)
         self.b = torch.from_numpy(b_vec).float().to(device)
         self.data_weight = data_weight
+        self.physics_weight = physics_weight
         self.n_data_points = n_data_points
         self.mse_loss = nn.MSELoss()
 
@@ -98,11 +99,12 @@ class PhysicsInformedLoss(nn.Module):
 
             idx = torch.randperm(n, device=T_pred.device)[:k]
             data_loss = torch.mean((T_pred[idx] - T_true[idx]) ** 2)
+
         else:
             data_loss = torch.tensor(0.0, device=T_pred.device)
 
         # Total loss with weighting
-        total_loss = physics_loss + self.data_weight * data_loss
+        total_loss = self.physics_weight * physics_loss + self.data_weight * data_loss
         return total_loss
     
 # ---------------------------
@@ -114,8 +116,8 @@ print("Using device:", device)
 
 loader = DataLoader(TensorDataset(Input_train.to(device), T_train_true.to(device)), batch_size=len(Input_train), shuffle=False)
 
-criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=1e-5, n_data_points=1, device=device)
-training_repetitions = 2
+criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=1.0, physics_weight=1.0e5, n_data_points=1, device=device)
+training_repetitions = 5
 epochs = 1000
 
 # optimizer_configs = {
@@ -140,10 +142,10 @@ optimizer_configs = {
 
 # print(Input_train.shape, T_train_true.shape)
 
-results = multi_training.train_opt(LinearNN, optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=611)
+results = multi_training.train_opt(LinearNN, optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=709)
 
-with open("outputs/opt_state/optimizer_results_pinn_weight_decay.pkl", "wb") as f:
-    pkl.dump(results, f)
+# with open("outputs/opt_state/optimizer_results_scaledphys_weight_decay.pkl", "wb") as f:
+#     pkl.dump(results, f)
 
 # ---------------------------
 # TEST data setup (can differ from training)
@@ -173,20 +175,29 @@ for opt_name in results:
     results_dir = "nn_results"
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
-    pred_base = f"predictions_errors_pinn_{opt_name}"
-    pred_dir = os.path.join(results_dir, pred_base)
+    # pred_base = f"predictions_errors_scaledphys_{opt_name}"
+    # pred_dir = os.path.join(results_dir, pred_base)
 
     # ---------------------------
     # Export results to OpenFOAM
     # ---------------------------
-    a.setT(T_test_pred.reshape(-1,))
-    a.exportT(".", os.path.join(pred_dir, "1"), "T")  # predicted test
+    # # print(T_test_pred)
+    # a.setT(T_test_pred.reshape(-1,))
+    # # a.exportT(".", os.path.join(pred_dir, "1"), "T")  # predicted tests
 
-    a.setT(T_test_true.reshape(-1,))
-    a.exportT(".", os.path.join(pred_dir, "2"), "T")  # true test
+    # a.setT(T_test_true.reshape(-1,))
+    # # a.exportT(".", os.path.join(pred_dir, "2"), "T")  # true test
 
-    a.setT(np.abs(T_test_pred - T_test_true).reshape(-1,))
-    a.exportT(".", os.path.join(pred_dir, "3"), "T")  # absolute error map
+    # a.setT(np.abs(T_test_pred - T_test_true).reshape(-1,))
+    # # a.exportT(".", os.path.join(pred_dir, "3"), "T")  # absolute error map
     
-    a.setT(np.abs((T_test_pred - T_test_true) / (T_test_true + 1e-30)).reshape(-1,))
-    a.exportT(".", os.path.join(pred_dir, "4"), "T")  # relative error map
+    # a.setT((np.abs((T_test_pred - T_test_true) )/ (T_test_true + 1e-30)).reshape(-1,))
+    # # a.exportT(".", os.path.join(pred_dir, "4"), "T")  # relative error map
+    print(f"Mean T {opt_name}: {(np.mean(np.abs(T_test_true))):.6f}")
+    print(f"Mean T {opt_name}: {(np.mean(np.abs(T_test_pred))):.6f}")
+    print(f"Mean absolute error for {opt_name}: {(np.mean(np.abs((T_test_pred - T_test_true) ))):.6f}")
+    print(f"Mean relative error for {opt_name}: {(np.mean(np.abs((T_test_pred-T_test_true))/(T_test_pred+1e-10))):.6f}")
+    print(min(abs(T_test_true)), max(abs(T_test_true)))
+    print(min(abs(T_test_pred-T_test_true)), max(abs(T_test_pred-T_test_true)))
+    print(max(np.abs((T_test_pred-T_test_true))/(T_test_pred)))
+
