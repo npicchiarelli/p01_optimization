@@ -1,5 +1,6 @@
 import pickle as pkl
 import os
+import sys
 
 import numpy as np
 import torch
@@ -24,7 +25,6 @@ a = of_pybind11_system(["."])
 # Mesh coordinates
 X = a.getX()[0::3, 0]
 Y = a.getX()[1::3, 0]
-print(a.getX().shape)
 
 # Get temperature and source arrays from OF
 T = a.getT()
@@ -43,8 +43,6 @@ b_vec_train = a.get_rhs(T, S_train).reshape(-1, 1)        # (N, 1)
 # "Data" target (e.g., high-fidelity solution for training)
 T_train_true = np.linalg.solve(A_mat_train, b_vec_train)  # (N, 1)
 print("Training data setup complete. System matrix shape:", A_mat_train.shape)
-print(T_train_true.shape)
-print(T.shape)
 
 # Input for training [x, y, s_train]
 Input_train = torch.zeros(len(X), 3)
@@ -78,13 +76,13 @@ class LinearNN(nn.Module):
 # Define the physics-informed loss function
 # ---------------------------
 class PhysicsInformedLoss(nn.Module):
-    def __init__(self, A_mat: np.ndarray, b_vec: np.ndarray, data_weight: float = 0.0, physics_weight: float = 1.0, n_data_points: int = None, device=None):
+    def __init__(self, A_mat: np.ndarray, b_vec: np.ndarray, data_weight: float = 0.0, physics_weight: float = 1.0, data_points_indices: np.ndarray = None, device=None):
         super().__init__()
         self.A = torch.from_numpy(A_mat).float().to(device)
         self.b = torch.from_numpy(b_vec).float().to(device)
         self.data_weight = data_weight
         self.physics_weight = physics_weight
-        self.n_data_points = n_data_points
+        self.data_points_indices = data_points_indices
         self.mse_loss = nn.MSELoss()
 
     def forward(self, T_pred: torch.Tensor, T_true: torch.Tensor) -> torch.Tensor:
@@ -94,11 +92,7 @@ class PhysicsInformedLoss(nn.Module):
 
         # Data loss: ||T_pred - T_true||^2
         if self.data_weight > 0.0:
-            n = T_pred.shape[0]
-            k = self.n_data_points if self.n_data_points is not None else n
-
-            idx = torch.randperm(n, device=T_pred.device)[:k]
-            data_loss = torch.mean((T_pred[idx] - T_true[idx]) ** 2)
+            data_loss = torch.mean((T_pred[self.data_points_indices] - T_true[self.data_points_indices]) ** 2)
 
         else:
             data_loss = torch.tensor(0.0, device=T_pred.device)
@@ -116,9 +110,14 @@ print("Using device:", device)
 
 loader = DataLoader(TensorDataset(Input_train.to(device), T_train_true.to(device)), batch_size=len(Input_train), shuffle=False)
 
-criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=1.0, physics_weight=1.0e5, n_data_points=1, device=device)
-training_repetitions = 5
-epochs = 1000
+n_data_points = 1
+np.random.seed(610)  # For reproducibility of data point selection
+data_points_indices = np.random.choice(len(Input_train), size=n_data_points, replace=False)
+print("Data points indices for loss:", data_points_indices)
+
+criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=1.0, physics_weight=1.0e5, data_points_indices=data_points_indices, device=device)
+training_repetitions = 1
+epochs = 100
 
 # optimizer_configs = {
 #     "SOAP_no_projection":   lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=False, precondition_frequency=100, weight_decay=0.0, shampoo_beta=0, normalize_grads=False), # For speed
@@ -196,8 +195,7 @@ for opt_name in results:
     print(f"Mean T {opt_name}: {(np.mean(np.abs(T_test_true))):.6f}")
     print(f"Mean T {opt_name}: {(np.mean(np.abs(T_test_pred))):.6f}")
     print(f"Mean absolute error for {opt_name}: {(np.mean(np.abs((T_test_pred - T_test_true) ))):.6f}")
-    print(f"Mean relative error for {opt_name}: {(np.mean(np.abs((T_test_pred-T_test_true))/(T_test_pred+1e-10))):.6f}")
+    print(f"Mean relative error for {opt_name}: {(np.mean(np.abs((T_test_pred-T_test_true))/np.abs((T_test_pred)))):.6f}")
     print(min(abs(T_test_true)), max(abs(T_test_true)))
     print(min(abs(T_test_pred-T_test_true)), max(abs(T_test_pred-T_test_true)))
     print(max(np.abs((T_test_pred-T_test_true))/(T_test_pred)))
-
