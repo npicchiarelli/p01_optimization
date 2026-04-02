@@ -7,7 +7,8 @@ def reset_weights(m, seed):
     if hasattr(m, 'reset_parameters'):
         torch.manual_seed(seed)
         torch.nn.init.xavier_normal_(m.weight)
-        torch.nn.init.zeros_(m.bias)
+        if m.bias is not None:
+            torch.nn.init.zeros_(m.bias)
 
 def train_opt(model_fun, opt_configs, criterion, loader, training_repetitions, epochs, device, seed_offset):
     results = {}
