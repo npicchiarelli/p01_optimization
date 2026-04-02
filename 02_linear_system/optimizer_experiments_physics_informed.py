@@ -1,22 +1,18 @@
-import pickle as pkl
 import os
+import pickle as pkl
 import sys
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 from torch.optim import Adam
+from torch.utils.data import DataLoader, TensorDataset
 
-from of_pybind11_system import of_pybind11_system
 from experimental_optimizers.soap_mods import SOAP
 from ml_tools import multi_training
+from of_pybind11_system import of_pybind11_system
 
-import matplotlib.pyplot as plt
-
-import os
-# print(os.getcwd())
-# print(os.environ['LD_LIBRARY_PATH'])
 # ---------------------------
 # Connect to pybind system
 # ------------------------- --
@@ -72,6 +68,16 @@ class LinearNN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
     
+class LinearModel(nn.Module):
+    def __init__(self, bias: bool = False):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3, 1, bias=bias),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+    
 # ---------------------------
 # Define the physics-informed loss function
 # ---------------------------
@@ -110,38 +116,20 @@ print("Using device:", device)
 
 loader = DataLoader(TensorDataset(Input_train.to(device), T_train_true.to(device)), batch_size=len(Input_train), shuffle=False)
 
-n_data_points = 1
-np.random.seed(610)  # For reproducibility of data point selection
+n_data_points = 10
+np.random.seed(69)  # For reproducibility of data point selection
 data_points_indices = np.random.choice(len(Input_train), size=n_data_points, replace=False)
 print("Data points indices for loss:", data_points_indices)
 
 criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=1.0, physics_weight=1.0e5, data_points_indices=data_points_indices, device=device)
-training_repetitions = 1
-epochs = 100
-
-# optimizer_configs = {
-#     "SOAP_no_projection":   lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=False, precondition_frequency=100, weight_decay=0.0, shampoo_beta=0, normalize_grads=False), # For speed
-#     "Adam":                 lambda p: Adam(p, lr=0.003, betas = (0.99, 0.999), amsgrad=False)
-# }
-# optimizer_configs = {
-#     "SOAP_no_projection":   lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=False, precondition_frequency=100, weight_decay=0.0, shampoo_beta=0, normalize_grads=False), # For speed
-#     "Adam":                 lambda p: Adam(p, lr=0.003, betas = (0.99, 0.999), amsgrad=False),
-#     "SOAP_with_projection":   lambda p: SOAP(p, lr=0.03, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=1, weight_decay=0.0,), # For speed
-# }
-
-# optimizer_configs = {
-#     "SOAP_with_projection_100":   lambda p: SOAP(p, lr=0.001, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=100, weight_decay=0.),
-#     "SOAP_with_projection_10":   lambda p: SOAP(p, lr=0.001, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=10, weight_decay=0.),
-# }
+training_repetitions = 5
+epochs = 1000
 
 optimizer_configs = {
-    # "SOAP":   lambda p: SOAP(p, lr=0.003, betas = (0.99, 0.999), precondition_1d=False, projection=True, precondition_frequency=10, weight_decay=0.0,), # For speed
     "SOAPW": lambda p: SOAP(p, lr=0.03, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=5),
 }
 
-# print(Input_train.shape, T_train_true.shape)
-
-results = multi_training.train_opt(LinearNN, optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=709)
+results = multi_training.train_opt(LinearModel, optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=709)
 
 # with open("outputs/opt_state/optimizer_results_scaledphys_weight_decay.pkl", "wb") as f:
 #     pkl.dump(results, f)
