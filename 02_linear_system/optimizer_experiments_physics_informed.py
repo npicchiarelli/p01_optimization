@@ -1,3 +1,4 @@
+import argparse
 import os
 import pickle as pkl
 import sys
@@ -11,7 +12,12 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from experimental_optimizers.soap_mods import SOAP
 from ml_tools import multi_training
+from models.models import LinearNN, VectorModel
 from of_pybind11_system import of_pybind11_system
+
+parser = argparse.ArgumentParser()
+parser.add_argument("-s", "--save", action="store_true", help="Flag to enable data saving")
+args = parser.parse_args()
 
 # ---------------------------
 # Connect to pybind system
@@ -35,6 +41,8 @@ for i in range(len(X)):
 # System for training case
 A_mat_train = a.get_system_matrix(T, S_train).toarray()   # (N, N)
 b_vec_train = a.get_rhs(T, S_train).reshape(-1, 1)        # (N, 1)
+print("System matrix and RHS vector for training case obtained. Shapes:", A_mat_train.shape, b_vec_train.shape)
+print("System matrix condition number:", np.linalg.cond(A_mat_train))
 
 # "Data" target (e.g., high-fidelity solution for training)
 T_train_true = np.linalg.solve(A_mat_train, b_vec_train)  # (N, 1)
@@ -48,36 +56,6 @@ Input_train[:, 2] = torch.from_numpy(S_train[:, 0]).float()
 
 T_train_true = torch.from_numpy(T_train_true).float()
 
-# ---------------------------
-# Define the model
-# ---------------------------
-
-class LinearNN(nn.Module):
-    def __init__(self, hidden_size: int = 64):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(3, hidden_size//2, bias=True),
-            nn.ReLU(),
-            nn.Linear(hidden_size//2, hidden_size, bias=True),
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size//2, bias=True),
-            nn.ReLU(),
-            nn.Linear(hidden_size//2, 1, bias=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-    
-class LinearModel(nn.Module):
-    def __init__(self, bias: bool = False):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(3, 1, bias=bias),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-    
 # ---------------------------
 # Define the physics-informed loss function
 # ---------------------------
@@ -116,23 +94,25 @@ print("Using device:", device)
 
 loader = DataLoader(TensorDataset(Input_train.to(device), T_train_true.to(device)), batch_size=len(Input_train), shuffle=False)
 
-n_data_points = 10
+n_data_points = 1
 np.random.seed(69)  # For reproducibility of data point selection
 data_points_indices = np.random.choice(len(Input_train), size=n_data_points, replace=False)
 print("Data points indices for loss:", data_points_indices)
 
-criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=1.0, physics_weight=1.0e5, data_points_indices=data_points_indices, device=device)
-training_repetitions = 5
-epochs = 1000
+criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=1.0, physics_weight=1e5, data_points_indices=data_points_indices, device=device)
+training_repetitions = 1
+epochs = 10
 
 optimizer_configs = {
-    "SOAPW": lambda p: SOAP(p, lr=0.03, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=5),
+    "SGD": lambda p: torch.optim.SGD(p, lr=0.03),
+    # "SOAPW": lambda p: SOAP(p, lr=0.03, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=5),
 }
 
-results = multi_training.train_opt(LinearModel, optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=709)
+results = multi_training.train_opt(LinearNN(hidden_size=64), optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=709)
 
-# with open("outputs/opt_state/optimizer_results_scaledphys_weight_decay.pkl", "wb") as f:
-#     pkl.dump(results, f)
+if args.save:
+    with open("outputs/opt_state/optimizer_results_test.pkl", "wb") as f:
+        pkl.dump(results, f)
 
 # ---------------------------
 # TEST data setup (can differ from training)
@@ -159,31 +139,33 @@ for opt_name in results:
     with torch.no_grad():
         T_test_pred = model(Input_test.to(device)).cpu().numpy()
 
-    results_dir = "nn_results"
-    if not os.path.exists(results_dir):
-        os.makedirs(results_dir)
-    # pred_base = f"predictions_errors_scaledphys_{opt_name}"
-    # pred_dir = os.path.join(results_dir, pred_base)
+    if args.save:
+        results_dir = "nn_results"
+        if not os.path.exists(results_dir):
+            os.makedirs(results_dir)
+        pred_base = f"predictions_errors_linearmodel_mix{opt_name}"
+        pred_dir = os.path.join(results_dir, pred_base)
 
-    # ---------------------------
-    # Export results to OpenFOAM
-    # ---------------------------
-    # # print(T_test_pred)
-    # a.setT(T_test_pred.reshape(-1,))
-    # # a.exportT(".", os.path.join(pred_dir, "1"), "T")  # predicted tests
+        # ---------------------------
+        # Export results to OpenFOAM
+        # ---------------------------
+        print(T_test_pred)
+        a.setT(T_test_pred.reshape(-1,))
+        a.exportT(".", os.path.join(pred_dir, "1"), "T")  # predicted tests
 
-    # a.setT(T_test_true.reshape(-1,))
-    # # a.exportT(".", os.path.join(pred_dir, "2"), "T")  # true test
+        a.setT(T_test_true.reshape(-1,))
+        a.exportT(".", os.path.join(pred_dir, "2"), "T")  # true test
 
-    # a.setT(np.abs(T_test_pred - T_test_true).reshape(-1,))
-    # # a.exportT(".", os.path.join(pred_dir, "3"), "T")  # absolute error map
-    
-    # a.setT((np.abs((T_test_pred - T_test_true) )/ (T_test_true + 1e-30)).reshape(-1,))
-    # # a.exportT(".", os.path.join(pred_dir, "4"), "T")  # relative error map
+        a.setT(np.abs(T_test_pred - T_test_true).reshape(-1,))
+        a.exportT(".", os.path.join(pred_dir, "3"), "T")  # absolute error map
+        
+        a.setT((np.abs((T_test_pred - T_test_true) ) / (np.abs(T_test_pred) + 1e-10)).reshape(-1,))
+        a.exportT(".", os.path.join(pred_dir, "4"), "T")  # relative error map
+
     print(f"Mean T {opt_name}: {(np.mean(np.abs(T_test_true))):.6f}")
     print(f"Mean T {opt_name}: {(np.mean(np.abs(T_test_pred))):.6f}")
     print(f"Mean absolute error for {opt_name}: {(np.mean(np.abs((T_test_pred - T_test_true) ))):.6f}")
     print(f"Mean relative error for {opt_name}: {(np.mean(np.abs((T_test_pred-T_test_true))/np.abs((T_test_pred)))):.6f}")
     print(min(abs(T_test_true)), max(abs(T_test_true)))
     print(min(abs(T_test_pred-T_test_true)), max(abs(T_test_pred-T_test_true)))
-    print(max(np.abs((T_test_pred-T_test_true))/(T_test_pred)))
+    print(max(np.abs((T_test_pred-T_test_true))/(T_test_pred)), np.argmax(np.abs((T_test_pred-T_test_true))/(T_test_pred)))
