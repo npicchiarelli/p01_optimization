@@ -1,6 +1,7 @@
 import argparse
 import os
 import pickle as pkl
+import shutil
 import sys
 
 import matplotlib.pyplot as plt
@@ -16,8 +17,47 @@ from models.models import LinearNN, VectorModel
 from of_pybind11_system import of_pybind11_system
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-s", "--save", action="store_true", help="Flag to enable data saving")
+parser.add_argument("-s", "--save",
+                    action="store_true",
+                    help="Flag to enable data saving")
+
+parser.add_argument("-m", "--model",
+                    type=str,
+                    help="Model name")
+
+parser.add_argument("-o", "--optimizer",
+                    type=str,
+                    help="Optimizer name")
+
 args = parser.parse_args()
+
+if args.save:
+    if not args.model or not args.optimizer:
+        parser.error("--model and --optimizer are required when --save is used")
+
+print("Starting physics-informed training experiment with model:", args.model, "and optimizer:", args.optimizer)
+
+# ---------------------------
+# Saving directories setup
+# ---------------------------
+
+
+if args.save:
+    outputs_dir = "outputs"
+    base_name = f"{args.model}_{args.optimizer}"
+    res_path = os.path.join(outputs_dir, base_name)
+
+    if os.path.exists(res_path):
+        i = 1
+        while True:
+            new_path = os.path.join(outputs_dir, f"{base_name}_{i:02d}")
+            if not os.path.exists(new_path):
+                res_path = new_path
+                break
+            i += 1
+
+    os.makedirs(res_path, exist_ok=True)
+    print("Data will be saved to:", res_path)
 
 # ---------------------------
 # Connect to pybind system
@@ -108,15 +148,21 @@ optimizer_configs = {
     # "SOAPW": lambda p: SOAP(p, lr=0.03, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=5),
 }
 
-results = multi_training.train_opt(LinearNN(hidden_size=64), optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=709)
+model = LinearNN(hidden_size=64)
+results = multi_training.train_opt(model, optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=709)
+
+
 
 if args.save:
-    with open("outputs/opt_state/optimizer_results_test.pkl", "wb") as f:
+    opt_results_path = os.path.join(res_path, "opt_state")
+    os.makedirs(opt_results_path)
+    with open(os.path.join(opt_results_path, "opt_results.pkl"), "wb") as f:
         pkl.dump(results, f)
 
 # ---------------------------
 # TEST data setup (can differ from training)
 # ---------------------------
+
 S_test = np.zeros_like(S)
 for i in range(len(X)):
     S_test[i, 0] = np.sin(np.pi * X[i]) * np.sin(np.pi * Y[i])
@@ -133,39 +179,69 @@ Input_test[:, 2] = torch.from_numpy(S_test[:, 0]).float()
 T_test_true = np.linalg.solve(A_mat_test, b_vec_test)
 
 for opt_name in results:
-    model = results[opt_name]["model"]
+    model.load_state_dict(results[opt_name]["best_model_state"])
 
     model.eval()
     with torch.no_grad():
         T_test_pred = model(Input_test.to(device)).cpu().numpy()
 
     if args.save:
-        results_dir = "nn_results"
-        if not os.path.exists(results_dir):
-            os.makedirs(results_dir)
-        pred_base = f"predictions_errors_linearmodel_mix{opt_name}"
-        pred_dir = os.path.join(results_dir, pred_base)
+        nn_results_dir = os.path.join(res_path, "nn_results")
+        os.makedirs(nn_results_dir)
 
         # ---------------------------
-        # Export results to OpenFOAM
+        # Export performance metrics
         # ---------------------------
-        print(T_test_pred)
+
+        abs_err = np.abs(T_test_pred - T_test_true) # absolute error
+        mae = np.mean(abs_err)
+        relative_error = np.abs((T_test_pred - T_test_true)) / (np.abs(T_test_pred) + 1e-10) # relative error with small epsilon to avoid division by zero
+        mre = np.mean(relative_error)
+        normalized_error = abs_err / (np.mean(np.abs(T_test_pred)) + 1e-10) # normalized error
+        mne = np.mean(normalized_error)
+
+        perform_dict = {
+            "T_true": T_test_true,
+            "T_pred": T_test_pred,
+            "abs_error": abs_err,
+            "mae": mae,
+            "relative_error": relative_error,
+            "mre": mre,
+            "normalized_error": normalized_error,
+            "mne" : mne,
+        }
+        
+        pkl.dump(perform_dict, open(os.path.join(nn_results_dir, "performance_metrics.pkl"), "wb"))
+
+        # -------------------------------------------
+        # Export OpenFOAM fields for visualization
+        # -------------------------------------------
+
+        for of_dir in ["system", "constant", "0"]:
+            shutil.copytree(os.path.join(of_dir), os.path.join(nn_results_dir, of_dir))
+
         a.setT(T_test_pred.reshape(-1,))
-        a.exportT(".", os.path.join(pred_dir, "1"), "T")  # predicted tests
+        a.exportT(".", os.path.join(nn_results_dir, "1"), "T")  # predicted tests
 
         a.setT(T_test_true.reshape(-1,))
-        a.exportT(".", os.path.join(pred_dir, "2"), "T")  # true test
+        a.exportT(".", os.path.join(nn_results_dir, "2"), "T")  # true test
 
         a.setT(np.abs(T_test_pred - T_test_true).reshape(-1,))
-        a.exportT(".", os.path.join(pred_dir, "3"), "T")  # absolute error map
+        a.exportT(".", os.path.join(nn_results_dir, "3"), "T")  # absolute error map
         
         a.setT((np.abs((T_test_pred - T_test_true) ) / (np.abs(T_test_pred) + 1e-10)).reshape(-1,))
-        a.exportT(".", os.path.join(pred_dir, "4"), "T")  # relative error map
+        a.exportT(".", os.path.join(nn_results_dir, "4"), "T")  # relative error map
+
 
     print(f"Mean T {opt_name}: {(np.mean(np.abs(T_test_true))):.6f}")
     print(f"Mean T {opt_name}: {(np.mean(np.abs(T_test_pred))):.6f}")
-    print(f"Mean absolute error for {opt_name}: {(np.mean(np.abs((T_test_pred - T_test_true) ))):.6f}")
-    print(f"Mean relative error for {opt_name}: {(np.mean(np.abs((T_test_pred-T_test_true))/np.abs((T_test_pred)))):.6f}")
-    print(min(abs(T_test_true)), max(abs(T_test_true)))
-    print(min(abs(T_test_pred-T_test_true)), max(abs(T_test_pred-T_test_true)))
-    print(max(np.abs((T_test_pred-T_test_true))/(T_test_pred)), np.argmax(np.abs((T_test_pred-T_test_true))/(T_test_pred)))
+    print(f"Mean absolute error for {opt_name}: {mae:.6f}")
+    print(f"Mean relative error for {opt_name}: {mre:.6f}")
+    print(f"Mean normalized error for {opt_name}: {mne:.6f}")
+
+    print(f"Min absolute T_true for {opt_name}: {np.min(np.abs(T_test_true)):.6f}")
+    print(f"Max absolute T_true for {opt_name}: {np.max(np.abs(T_test_true)):.6f}")
+    print(f"Min absolute T_pred-T_true for {opt_name}: {np.min(np.abs(T_test_pred-T_test_true)):.6f}")
+    print(f"Max absolute T_pred-T_true for {opt_name}: {np.max(np.abs(T_test_pred-T_test_true)):.6f}")
+    print(f"Max relative error for {opt_name}: {np.max(np.abs((T_test_pred-T_test_true))/(T_test_pred)):.6f}")
+    print(f"Argmax relative error for {opt_name}: {np.argmax(np.abs((T_test_pred-T_test_true))/(T_test_pred)):.6f}")
