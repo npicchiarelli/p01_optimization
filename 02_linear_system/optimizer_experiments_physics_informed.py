@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
 from torch.utils.data import DataLoader, TensorDataset
 
 from experimental_optimizers.soap_mods import SOAP
@@ -41,7 +41,7 @@ print("Starting physics-informed training experiment with model:", args.model, "
 # Saving directories setup
 # ---------------------------
 
-
+os.chdir("thickerCase")
 if args.save:
     outputs_dir = "outputs"
     base_name = f"{args.model}_{args.optimizer}"
@@ -67,6 +67,7 @@ a = of_pybind11_system(["."])
 # Mesh coordinates
 X = a.getX()[0::3, 0]
 Y = a.getX()[1::3, 0]
+
 
 # Get temperature and source arrays from OF
 T = a.getT()
@@ -100,23 +101,38 @@ T_train_true = torch.from_numpy(T_train_true).float()
 # Define the physics-informed loss function
 # ---------------------------
 class PhysicsInformedLoss(nn.Module):
-    def __init__(self, A_mat: np.ndarray, b_vec: np.ndarray, data_weight: float = 0.0, physics_weight: float = 1.0, data_points_indices: np.ndarray = None, device=None):
+    def __init__(self, A_mat: np.ndarray, b_vec: np.ndarray, data_weight: float = 0.0, physics_weight: float = 1.0, data_points_indices: np.ndarray = None, norm: str = "l2", device="cpu"):
         super().__init__()
         self.A = torch.from_numpy(A_mat).float().to(device)
         self.b = torch.from_numpy(b_vec).float().to(device)
         self.data_weight = data_weight
         self.physics_weight = physics_weight
         self.data_points_indices = data_points_indices
-        self.mse_loss = nn.MSELoss()
+        self.norm = norm
+        if self.norm == "l2":
+            self.base_loss = nn.MSELoss()
+        elif self.norm == "l1":
+                self.base_loss = nn.L1Loss()
+        else:
+            raise ValueError("Unsupported norm type. Use 'l1' or 'l2'.")
 
     def forward(self, T_pred: torch.Tensor, T_true: torch.Tensor) -> torch.Tensor:
-        # Physics loss: ||A * T_pred - b||^2
-        physics_residual = self.A @ T_pred - self.b
-        physics_loss = torch.mean(physics_residual ** 2)
+        if self.physics_weight > 0.0:
+            # Physics residual: A * T_pred - b
+            physics_residual = self.A @ T_pred - self.b
+            if self.norm == "l2":
+                physics_loss = torch.mean(physics_residual ** 2)
+            elif self.norm == "l1":
+                physics_loss = torch.mean(torch.abs(physics_residual))
 
-        # Data loss: ||T_pred - T_true||^2
+        else:
+            physics_loss = torch.tensor(0.0, device=T_pred.device)
+
         if self.data_weight > 0.0:
-            data_loss = torch.mean((T_pred[self.data_points_indices] - T_true[self.data_points_indices]) ** 2)
+            if self.norm == "l2":
+                data_loss = torch.mean((T_pred[self.data_points_indices] - T_true[self.data_points_indices]) ** 2)
+            elif self.norm == "l1":
+                data_loss = torch.mean(torch.abs(T_pred[self.data_points_indices] - T_true[self.data_points_indices]))
 
         else:
             data_loss = torch.tensor(0.0, device=T_pred.device)
@@ -135,23 +151,30 @@ print("Using device:", device)
 loader = DataLoader(TensorDataset(Input_train.to(device), T_train_true.to(device)), batch_size=len(Input_train), shuffle=False)
 
 n_data_points = 1
-np.random.seed(69)  # For reproducibility of data point selection
-data_points_indices = np.random.choice(len(Input_train), size=n_data_points, replace=False)
+# np.random.seed(22)  # For reproducibility of data point selection
+# data_points_indices = np.random.choice(len(Input_train), size=n_data_points, replace=False)
+data_points_indices = np.array([0])
 print("Data points indices for loss:", data_points_indices)
 
-criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=1.0, physics_weight=1e5, data_points_indices=data_points_indices, device=device)
+criterion = PhysicsInformedLoss(A_mat_train, b_vec_train, data_weight=1.0, physics_weight=1e5, data_points_indices=data_points_indices, norm="l1", device=device)
+loss_dict = {
+    "A_mat": criterion.A.cpu().numpy(),
+    "b_vec": criterion.b.cpu().numpy(),
+    "data_weight": criterion.data_weight,
+    "physics_weight": criterion.physics_weight,
+    "data_points_indices": criterion.data_points_indices,
+}
+
 training_repetitions = 1
-epochs = 10
+epochs = 20
 
 optimizer_configs = {
-    "SGD": lambda p: torch.optim.SGD(p, lr=0.03),
-    # "SOAPW": lambda p: SOAP(p, lr=0.03, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=5),
+    "SOAPW": lambda p: SOAP(p, lr=0.03, betas = (0.99, 0.999), precondition_1d=True, projection=True, precondition_frequency=5),
+    "AdamW": lambda p: AdamW(p, lr=0.03, betas=(0.99, 0.999)),
 }
 
 model = LinearNN(hidden_size=64)
 results = multi_training.train_opt(model, optimizer_configs, criterion, loader, training_repetitions, epochs, device, seed_offset=709)
-
-
 
 if args.save:
     opt_results_path = os.path.join(res_path, "opt_state")
@@ -185,20 +208,20 @@ for opt_name in results:
     with torch.no_grad():
         T_test_pred = model(Input_test.to(device)).cpu().numpy()
 
+    # ---------------------------
+    # Export performance metrics
+    # ---------------------------
+
+    abs_err = np.abs(T_test_pred - T_test_true) # absolute error
+    mae = np.mean(abs_err)
+    relative_error = np.abs((T_test_pred - T_test_true)) / (np.abs(T_test_pred) + 1e-10) # relative error with small epsilon to avoid division by zero
+    mre = np.mean(relative_error)
+    normalized_error = abs_err / (np.mean(np.abs(T_test_pred)) + 1e-10) # normalized error
+    mne = np.mean(normalized_error)
+
     if args.save:
-        nn_results_dir = os.path.join(res_path, "nn_results")
+        nn_results_dir = os.path.join(res_path, "nn_results", f"{opt_name}")
         os.makedirs(nn_results_dir)
-
-        # ---------------------------
-        # Export performance metrics
-        # ---------------------------
-
-        abs_err = np.abs(T_test_pred - T_test_true) # absolute error
-        mae = np.mean(abs_err)
-        relative_error = np.abs((T_test_pred - T_test_true)) / (np.abs(T_test_pred) + 1e-10) # relative error with small epsilon to avoid division by zero
-        mre = np.mean(relative_error)
-        normalized_error = abs_err / (np.mean(np.abs(T_test_pred)) + 1e-10) # normalized error
-        mne = np.mean(normalized_error)
 
         perform_dict = {
             "T_true": T_test_true,
@@ -209,6 +232,7 @@ for opt_name in results:
             "mre": mre,
             "normalized_error": normalized_error,
             "mne" : mne,
+            "datapoints_indices": data_points_indices
         }
         
         pkl.dump(perform_dict, open(os.path.join(nn_results_dir, "performance_metrics.pkl"), "wb"))
