@@ -26,3 +26,21 @@ class VectorModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+    
+class MatrixModel(nn.Module):
+    def __init__(self, n_nodes: int, bias: bool = False):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_nodes, n_nodes, bias=bias),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+    
+class BiasOnly(nn.Module):
+    def __init__(self, size: int):
+        super().__init__()
+        self.bias = nn.Parameter(torch.zeros(size))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.bias
