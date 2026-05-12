@@ -19,15 +19,49 @@ def train_opt(model_fun, opt_configs, criterion, loader, training_repetitions, e
 
     for opt_name in opt_configs:
         model = model_fun.to(device)
-        opt_fun = opt_configs[opt_name]
-        optimizer = opt_fun(model.parameters())
-        print(f"Training with optimizer {opt_name}...")
-        loss_history = np.zeros((epochs, training_repetitions))
-        best_loss = float('inf')
-        best_model_state = None
 
-        for rep in range(training_repetitions):
+        opt_fun = opt_configs[opt_name]
+        
+        print(f"Training with optimizer {opt_name}...")
+        results[opt_name] = training_loop(model, opt_fun, criterion, loader, training_repetitions, epochs, seed_offset)
+
+    return results
+
+def train_opt_early_stopping(model_fun, opt_configs,benchmark_opt, criterion, loader, training_repetitions, epochs, device, seed_offset):
+    results = {}
+
+    # First, train only the benchmark optimizer
+    model = model_fun.to(device)
+    opt_fun = opt_configs[benchmark_opt]
+ 
+    print(f"Training with optimizer {benchmark_opt}...")
+    results[benchmark_opt] = training_loop(model, opt_fun, criterion, loader, training_repetitions, epochs, seed_offset)
+
+    benchmark_loss = results[benchmark_opt]["loss_histories"].min()
+            
+
+    for opt_name in opt_configs:
+        model = model_fun.to(device)
+
+        if opt_name == benchmark_opt:
+            continue
+
+        opt_fun = opt_configs[opt_name]
+        
+
+        print(f"Training with optimizer {opt_name}...")
+        results[opt_name] = training_loop_early_stopping(model, opt_fun, criterion, loader, training_repetitions, epochs, seed_offset, benchmark_loss)
+
+    return results
+
+def training_loop(model, opt_fun, criterion, loader, training_repetitions, epochs, seed_offset):
+    loss_history = np.zeros((epochs, training_repetitions))
+    best_loss = float('inf')
+    best_model_state = None
+
+    for rep in range(training_repetitions):
             model.apply(lambda m: reset_weights(m, seed=rep + seed_offset))
+            optimizer = opt_fun(model.parameters())
 
             pbar = tqdm(range(epochs), desc="Training")
             for epoch in pbar:
@@ -35,26 +69,53 @@ def train_opt(model_fun, opt_configs, criterion, loader, training_repetitions, e
                 for x_batch, y_batch in loader:
                     optimizer.zero_grad()
                     y_pred = model(x_batch)
-                    loss = criterion(y_pred, y_batch)
+                    loss = criterion(y_pred.transpose(0, 1), y_batch)
                     loss.backward()
                     optimizer.step()
                     epoch_loss += loss.item() * len(x_batch)
+                    epoch_loss /= len(loader.dataset)
                     if epoch_loss < best_loss:
                         best_loss = epoch_loss
                         best_model_state = copy.deepcopy(model.state_dict())
 
-                epoch_loss /= len(loader.dataset)
                 loss_history[epoch, rep] = epoch_loss
                 if epoch % 10 == 0:
-                    pbar.set_postfix(loss=f"{epoch_loss:.6f}")
+                    pbar.set_postfix(loss=f"{epoch_loss:.2e}")
+    return {"best_model_state": best_model_state, "opt_state": optimizer.state_dict(), "loss_histories": loss_history}
 
-        results[opt_name] = {
-            "best_model_state": best_model_state,
-            "opt_state": optimizer.state_dict(),
-            "loss_histories": loss_history,
-        }
+def training_loop_early_stopping(model, opt_fun, criterion, loader, training_repetitions, epochs, seed_offset, benchmark_loss):
+    loss_history = np.zeros((epochs, training_repetitions))
+    best_loss = float('inf')
+    best_model_state = None
 
-    return results
+    for rep in range(training_repetitions):
+            optimizer = opt_fun(model.parameters())
+            model.apply(lambda m: reset_weights(m, seed=rep + seed_offset))
+
+            pbar = tqdm(range(epochs), desc="Training")
+            for epoch in pbar:
+                if epoch > 0 and loss_history[epoch-1, rep] < benchmark_loss:
+                    print(f"Early stopping at epoch {epoch} with loss {loss_history[epoch-1, rep]:.2e} below benchmark {benchmark_loss:.2e}")
+                    loss_history[epoch:, rep] = loss_history[epoch - 1, rep]
+                    best_model_state = copy.deepcopy(model.state_dict())
+                    break
+                epoch_loss = 0.0
+                for x_batch, y_batch in loader:
+                    optimizer.zero_grad()
+                    y_pred = model(x_batch)
+                    loss = criterion(y_pred.transpose(0, 1), y_batch)
+                    loss.backward()
+                    optimizer.step()
+                    epoch_loss += loss.item() * len(x_batch)
+                    epoch_loss /= len(loader.dataset)
+                    if epoch_loss < best_loss:
+                        best_loss = epoch_loss
+                        best_model_state = copy.deepcopy(model.state_dict())
+
+                loss_history[epoch, rep] = epoch_loss
+                if epoch % 10 == 0:
+                    pbar.set_postfix(loss=f"{epoch_loss:.2e}")
+    return {"best_model_state": best_model_state, "opt_state": optimizer.state_dict(), "loss_histories": loss_history}
 
 
 def save_results(results, path):
