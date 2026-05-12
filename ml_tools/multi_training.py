@@ -37,7 +37,7 @@ def train_opt_early_stopping(model_fun, opt_configs,benchmark_opt, criterion, lo
     print(f"Training with optimizer {benchmark_opt}...")
     results[benchmark_opt] = training_loop(model, opt_fun, criterion, loader, training_repetitions, epochs, seed_offset)
 
-    benchmark_loss = results[benchmark_opt]["loss_histories"].min()
+    benchmark_loss = np.nanmin(results[benchmark_opt]["loss_histories"])
             
 
     for opt_name in opt_configs:
@@ -73,8 +73,8 @@ def training_loop(model, opt_fun, criterion, loader, training_repetitions, epoch
                     loss.backward()
                     optimizer.step()
                     epoch_loss += loss.item() * len(x_batch)
-                    epoch_loss /= len(loader.dataset)
-                    if epoch_loss < best_loss:
+                epoch_loss /= len(loader.dataset)
+                if epoch_loss < best_loss:
                         best_loss = epoch_loss
                         best_model_state = copy.deepcopy(model.state_dict())
 
@@ -84,7 +84,7 @@ def training_loop(model, opt_fun, criterion, loader, training_repetitions, epoch
     return {"best_model_state": best_model_state, "opt_state": optimizer.state_dict(), "loss_histories": loss_history}
 
 def training_loop_early_stopping(model, opt_fun, criterion, loader, training_repetitions, epochs, seed_offset, benchmark_loss):
-    loss_history = np.zeros((epochs, training_repetitions))
+    loss_history = np.full((epochs, training_repetitions), np.nan)
     best_loss = float('inf')
     best_model_state = None
 
@@ -107,8 +107,8 @@ def training_loop_early_stopping(model, opt_fun, criterion, loader, training_rep
                     loss.backward()
                     optimizer.step()
                     epoch_loss += loss.item() * len(x_batch)
-                    epoch_loss /= len(loader.dataset)
-                    if epoch_loss < best_loss:
+                epoch_loss /= len(loader.dataset)
+                if epoch_loss < best_loss:
                         best_loss = epoch_loss
                         best_model_state = copy.deepcopy(model.state_dict())
 
